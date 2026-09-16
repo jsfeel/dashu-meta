@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Meta 광고 대시보드</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card-bg: #ffffff;
+    --text: #1a1d23;
+    --text-muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --active: #16a34a;
+    --paused: #9ca3af;
+    --danger: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 24px 32px 0;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
+
+  .controls {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    padding: 0 32px;
+    margin-bottom: 20px;
+  }
+  .tab-group, .select-group { display: flex; gap: 8px; align-items: center; }
+  .tab-btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-muted);
+  }
+  .tab-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  select {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 14px;
+    background: var(--card-bg);
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    padding: 0 32px;
+    margin-bottom: 24px;
+  }
+  .summary-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .summary-card .label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .summary-card .value { font-size: 20px; font-weight: 600; }
+
+  .table-wrap { padding: 0 32px 40px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--card-bg); border-radius: 12px; overflow: hidden; }
+  th, td { padding: 12px 14px; text-align: right; font-size: 13px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-muted); font-weight: 500; background: #fafafa; }
+  tbody tr:hover { background: #f9fafb; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge.ACTIVE { background: #dcfce7; color: var(--active); }
+  .badge.PAUSED { background: #f3f4f6; color: var(--paused); }
+  .badge.UNKNOWN, .badge.ARCHIVED, .badge.DELETED { background: #f3f4f6; color: var(--text-muted); }
+
+  .state-msg { padding: 40px 32px; color: var(--text-muted); text-align: center; }
+  .error { color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Meta 광고 대시보드</h1>
+  <div class="subtitle" id="updated-at">불러오는 중...</div>
+</header>
+
+<div class="controls">
+  <div class="tab-group" id="brand-tabs">
+    <button class="tab-btn active" data-brand="dashu">다슈</button>
+    <button class="tab-btn" data-brand="daleaf">달리프</button>
+    <button class="tab-btn" data-brand="ohype">오하입</button>
+  </div>
+  <div class="select-group">
+    <select id="range-select">
+      <option value="today">오늘</option>
+      <option value="yesterday">어제</option>
+      <option value="last_7d" selected>최근 7일</option>
+      <option value="last_14d">최근 14일</option>
+      <option value="last_30d">최근 30일</option>
+      <option value="this_month">이번 달</option>
+      <option value="last_month">지난 달</option>
+    </select>
+  </div>
+</div>
+
+<div class="summary-grid" id="summary-grid"></div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>캠페인명</th>
+        <th>상태</th>
+        <th>소진액</th>
+        <th>노출수</th>
+        <th>클릭수</th>
+        <th>CTR</th>
+        <th>CPC</th>
+        <th>구매</th>
+        <th>매출</th>
+        <th>ROAS</th>
+      </tr>
+    </thead>
+    <tbody id="campaign-tbody">
+      <tr><td colspan="10" class="state-msg">불러오는 중...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+  const brandTabs = document.getElementById('brand-tabs');
+  const rangeSelect = document.getElementById('range-select');
+  const summaryGrid = document.getElementById('summary-grid');
+  const tbody = document.getElementById('campaign-tbody');
+  const updatedAt = document.getElementById('updated-at');
+
+  let currentBrand = 'dashu';
+
+  const fmtWon = (n) => '₩' + Math.round(n).toLocaleString('ko-KR');
+  const fmtNum = (n) => Math.round(n).toLocaleString('ko-KR');
+  const fmtPct = (n) => n.toFixed(2) + '%';
+  const fmtRoas = (n) => n.toFixed(2) + 'x';
+
+  const statusLabel = {
+    ACTIVE: '운영중',
+    PAUSED: '일시중지',
+    ARCHIVED: '보관됨',
+    DELETED: '삭제됨',
+    UNKNOWN: '알 수 없음',
+  };
+
+  async function loadData() {
+    tbody.innerHTML = '<tr><td colspan="10" class="state-msg">불러오는 중...</td></tr>';
+    summaryGrid.innerHTML = '';
+    updatedAt.textContent = '불러오는 중...';
+
+    const brand = currentBrand;
+    const range = rangeSelect.value;
+
+    try {
+      const res = await fetch(`/api/meta-ads?brand=${brand}&range=${range}`);
+      const data = await res.json();
+
+      if (data.error) {
+        tbody.innerHTML = `<tr><td colspan="10" class="state-msg error">오류: ${data.error}</td></tr>`;
+        updatedAt.textContent = '';
+        return;
+      }
+
+      renderSummary(data.summary);
+      renderTable(data.campaigns);
+      updatedAt.textContent = `마지막 업데이트: ${new Date(data.fetchedAt).toLocaleString('ko-KR')}`;
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="10" class="state-msg error">불러오기 실패: ${err.message}</td></tr>`;
+      updatedAt.textContent = '';
+    }
+  }
+
+  function renderSummary(s) {
+    const cards = [
+      { label: '총 소진액', value: fmtWon(s.spend) },
+      { label: '노출수', value: fmtNum(s.impressions) },
+      { label: '클릭수', value: fmtNum(s.clicks) },
+      { label: '평균 CTR', value: fmtPct(s.ctr) },
+      { label: '평균 CPC', value: fmtWon(s.cpc) },
+      { label: '구매 건수', value: fmtNum(s.purchases) },
+      { label: '전환 매출', value: fmtWon(s.revenue) },
+      { label: 'ROAS', value: fmtRoas(s.roas) },
+      { label: '운영중 캠페인', value: `${s.activeCampaigns} / ${s.totalCampaigns}` },
+    ];
+    summaryGrid.innerHTML = cards.map(c =>
+      `<div class="summary-card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`
+    ).join('');
+  }
+
+  function renderTable(campaigns) {
+    if (!campaigns.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="state-msg">해당 기간에 데이터가 없습니다.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = campaigns.map(c => `
+      <tr>
+        <td>${escapeHtml(c.name)}</td>
+        <td><span class="badge ${c.status}">${statusLabel[c.status] || c.status}</span></td>
+        <td>${fmtWon(c.spend)}</td>
+        <td>${fmtNum(c.impressions)}</td>
+        <td>${fmtNum(c.clicks)}</td>
+        <td>${fmtPct(c.ctr)}</td>
+        <td>${fmtWon(c.cpc)}</td>
+        <td>${fmtNum(c.purchases)}</td>
+        <td>${fmtWon(c.revenue)}</td>
+        <td>${fmtRoas(c.roas)}</td>
+      </tr>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  brandTabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    brandTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentBrand = btn.dataset.brand;
+    loadData();
+  });
+
+  rangeSelect.addEventListener('change', loadData);
+
+  loadData();
+  // 5분마다 자동 새로고침
+  setInterval(loadData, 5 * 60 * 1000);
+</script>
+
+</body>
+</html>
