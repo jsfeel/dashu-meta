@@ -49,12 +49,13 @@
   }
   .tab-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
   .tab-btn.sub { padding: 6px 14px; font-size: 13px; }
-  select {
+  select, input[type="date"] {
     padding: 8px 12px;
     border-radius: 8px;
     border: 1px solid var(--border);
     font-size: 14px;
     background: var(--card-bg);
+    color: var(--text);
   }
 
   .summary-grid {
@@ -123,7 +124,14 @@
       <option value="last_30d">최근 30일</option>
       <option value="this_month">이번 달</option>
       <option value="last_month">지난 달</option>
+      <option value="custom">직접 설정</option>
     </select>
+    <div id="custom-range-wrap" style="display:none; align-items:center; gap:6px;">
+      <input type="date" id="date-since" />
+      <span style="color:var(--text-muted); font-size:13px;">~</span>
+      <input type="date" id="date-until" />
+      <button class="tab-btn sub" id="apply-custom-range">조회</button>
+    </div>
   </div>
   <div class="row">
     <div class="tab-group sub-group" id="channel-tabs"></div>
@@ -192,6 +200,10 @@
   const brandTabs = document.getElementById('brand-tabs');
   const channelTabs = document.getElementById('channel-tabs');
   const rangeSelect = document.getElementById('range-select');
+  const customRangeWrap = document.getElementById('custom-range-wrap');
+  const dateSince = document.getElementById('date-since');
+  const dateUntil = document.getElementById('date-until');
+  const applyCustomRange = document.getElementById('apply-custom-range');
   const summaryGrid = document.getElementById('summary-grid');
   const tbody = document.getElementById('campaign-tbody');
   const updatedAt = document.getElementById('updated-at');
@@ -199,6 +211,13 @@
 
   let currentBrand = 'dashu';
   let currentChannel = 'all';
+
+  // 기본 커스텀 기간 값: 최근 7일
+  const today = new Date();
+  const weekAgo = new Date(today);
+  weekAgo.setDate(today.getDate() - 6);
+  dateUntil.value = today.toISOString().slice(0, 10);
+  dateSince.value = weekAgo.toISOString().slice(0, 10);
 
   const fmtWon = (n) => '₩' + Math.round(n).toLocaleString('ko-KR');
   const fmtNum = (n) => Math.round(n).toLocaleString('ko-KR');
@@ -226,8 +245,20 @@
     const channel = currentChannel;
     const range = rangeSelect.value;
 
+    let query = `brand=${brand}&channel=${channel}`;
+    if (range === 'custom') {
+      if (!dateSince.value || !dateUntil.value) {
+        tbody.innerHTML = '<tr><td colspan="11" class="state-msg error">시작일과 종료일을 모두 선택해주세요.</td></tr>';
+        updatedAt.textContent = '';
+        return;
+      }
+      query += `&since=${dateSince.value}&until=${dateUntil.value}`;
+    } else {
+      query += `&range=${range}`;
+    }
+
     try {
-      const res = await fetch(`/api/meta-ads?brand=${brand}&channel=${channel}&range=${range}`);
+      const res = await fetch(`/api/meta-ads?${query}`);
       const data = await res.json();
 
       if (data.error) {
@@ -314,7 +345,17 @@
     loadData();
   });
 
-  rangeSelect.addEventListener('change', loadData);
+  rangeSelect.addEventListener('change', () => {
+    if (rangeSelect.value === 'custom') {
+      customRangeWrap.style.display = 'flex';
+      // 날짜를 아직 조회하지 않은 상태이므로, 조회 버튼을 누르기 전까지는 목록을 갱신하지 않음
+    } else {
+      customRangeWrap.style.display = 'none';
+      loadData();
+    }
+  });
+
+  applyCustomRange.addEventListener('click', loadData);
 
   renderChannelTabs();
   loadData();

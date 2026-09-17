@@ -51,6 +51,14 @@ async function handleMetaAds(request, env) {
   const brand = (url.searchParams.get("brand") || "dashu").toLowerCase();
   const channel = (url.searchParams.get("channel") || "all").toLowerCase();
   const range = url.searchParams.get("range") || "last_7d";
+  const since = url.searchParams.get("since"); // YYYY-MM-DD
+  const until = url.searchParams.get("until"); // YYYY-MM-DD
+
+  // since/until이 둘 다 있으면 커스텀 기간(time_range)을 우선 사용, 없으면 range(date_preset) 사용
+  const dateParam =
+    since && until
+      ? `time_range=${encodeURIComponent(JSON.stringify({ since, until }))}`
+      : `date_preset=${range}`;
 
   const brandAccounts = ACCOUNTS[brand];
   if (!brandAccounts) {
@@ -69,7 +77,7 @@ async function handleMetaAds(request, env) {
 
   try {
     const channelResults = await Promise.all(
-      targetChannels.map(([key, account]) => fetchChannelData(key, account, range, env))
+      targetChannels.map(([key, account]) => fetchChannelData(key, account, dateParam, env))
     );
 
     // 에러가 하나라도 있으면 어떤 채널인지 표시해서 반환
@@ -124,7 +132,7 @@ async function handleMetaAds(request, env) {
   }
 }
 
-async function fetchChannelData(channelKey, account, range, env) {
+async function fetchChannelData(channelKey, account, dateParam, env) {
   const token = env[account.tokenKey];
   const adAccountId = `act_${account.id}`;
 
@@ -146,7 +154,7 @@ async function fetchChannelData(channelKey, account, range, env) {
 
   const insightsUrl =
     `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/insights` +
-    `?level=campaign&date_preset=${range}&fields=${insightFields}&limit=200&access_token=${token}`;
+    `?level=campaign&${dateParam}&fields=${insightFields}&limit=200&access_token=${token}`;
 
   const campaignsUrl =
     `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/campaigns` +
