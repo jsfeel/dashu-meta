@@ -1,7 +1,10 @@
 // src/index.js
 // Cloudflare Worker 엔트리포인트.
-// /api/meta-ads 요청은 브랜드+채널 단위로 Meta 계정을 조회해서
-// 캠페인 -> 광고세트 -> 소재(광고) 계층 구조로 집계해 내려주고,
+//
+// 지연 로딩(lazy load) 구조:
+//   GET /api/meta-ads                -> 캠페인 목록만 조회 (빠름)
+//   GET /api/meta-ads/adsets         -> 특정 캠페인의 광고세트 목록 조회 (캠페인 클릭 시)
+//   GET /api/meta-ads/ads            -> 특정 광고세트의 소재(광고) 목록 조회 (광고세트 클릭 시)
 // 그 외 요청은 정적 자산(ASSETS)으로 서빙합니다.
 
 const GRAPH_VERSION = "v21.0";
@@ -39,31 +42,40 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/meta-ads") {
-      return handleMetaAds(request, env);
-    }
+    if (url.pathname === "/api/meta-ads") return handleCampaigns(request, env);
+    if (url.pathname === "/api/meta-ads/adsets") return handleAdsets(request, env);
+    if (url.pathname === "/api/meta-ads/ads") return handleAds(request, env);
 
     return env.ASSETS.fetch(request);
   },
 };
 
-async function handleMetaAds(request, env) {
+function getDateParam(url) {
+  const range = url.searchParams.get("range") || "last_7d";
+  const since = url.searchParams.get("since");
+  const until = url.searchParams.get("until");
+  return since && until
+    ? `time_range=${encodeURIComponent(JSON.stringify({ since, until }))}`
+    : `date_preset=${range}`;
+}
+
+function getToken(env, brand, channelKey) {
+  const account = ACCOUNTS[brand] && ACCOUNTS[brand][channelKey];
+  if (!account) return { error: `알 수 없는 브랜드/채널입니다: ${brand}/${channelKey}` };
+  const token = env[account.tokenKey];
+  if (!token) return { error: `${account.tokenKey} 환경변수가 설정되지 않았습니다.` };
+  return { token, account };
+}
+
+// ---------- 1) 캠페인 목록 (지연 로딩의 최초 화면) ----------
+async function handleCampaigns(request, env) {
   const url = new URL(request.url);
   const brand = (url.searchParams.get("brand") || "dashu").toLowerCase();
   const channel = (url.searchParams.get("channel") || "all").toLowerCase();
-  const range = url.searchParams.get("range") || "last_7d";
-  const since = url.searchParams.get("since"); // YYYY-MM-DD
-  const until = url.searchParams.get("until"); // YYYY-MM-DD
-
-  const dateParam =
-    since && until
-      ? `time_range=${encodeURIComponent(JSON.stringify({ since, until }))}`
-      : `date_preset=${range}`;
+  const dateParam = getDateParam(url);
 
   const brandAccounts = ACCOUNTS[brand];
-  if (!brandAccounts) {
-    return jsonResponse({ error: `알 수 없는 브랜드입니다: ${brand}` }, 400);
-  }
+  if (!brandAccounts) return jsonResponse({ error: `알 수 없는 브랜드입니다: ${brand}` }, 400);
 
   const targetChannels =
     channel === "all"
@@ -75,9 +87,12 @@ async function handleMetaAds(request, env) {
   }
 
   try {
-    const channelResults = await Promise.all(
-      targetChannels.map(([key, account]) => fetchChannelData(key, account, dateParam, env))
-    );
+    // 채널을 동시에 다 조회하면 Cloudflare/Meta 쪽 동시 연결·요청 한도에 걸릴 수 있어 순차 처리
+    const channelResults = [];
+    for (const [channelKey, account] of targetChannels) {
+      const result = await fetchCampaignsForChannel(channelKey, account, dateParam, env);
+      channelResults.push(result);
+    }
 
     const errors = channelResults.filter((r) => r.error);
     if (errors.length > 0 && channelResults.every((r) => r.error)) {
@@ -87,11 +102,10 @@ async function handleMetaAds(request, env) {
       );
     }
 
-    // 모든 채널의 캠페인 트리를 하나로 합치되, 채널 라벨을 각 캠페인에 붙임
     const campaigns = [];
     channelResults.forEach((r) => {
       if (r.error) return;
-      r.campaigns.forEach((c) => campaigns.push({ ...c, channel: r.channelLabel }));
+      r.campaigns.forEach((c) => campaigns.push({ ...c, channel: r.channelLabel, channelKey: r.channelKey }));
     });
 
     campaigns.sort((a, b) => b.spend - a.spend);
@@ -105,7 +119,6 @@ async function handleMetaAds(request, env) {
     return jsonResponse({
       brand,
       channel,
-      range,
       summary,
       campaigns,
       partialErrors,
@@ -116,20 +129,134 @@ async function handleMetaAds(request, env) {
   }
 }
 
-async function fetchChannelData(channelKey, account, dateParam, env) {
+async function fetchCampaignsForChannel(channelKey, account, dateParam, env) {
   const token = env[account.tokenKey];
+  if (!token) {
+    return { channelLabel: account.label, channelKey, error: `${account.tokenKey} 환경변수가 설정되지 않았습니다.` };
+  }
   const adAccountId = `act_${account.id}`;
 
-  if (!token) {
-    return { channelLabel: account.label, error: `${account.tokenKey} 환경변수가 설정되지 않았습니다.` };
-  }
-
-  // 광고(ad) 단위로 인사이트를 한 번만 조회하면 campaign/adset/ad 이름이 전부 딸려옵니다.
   const insightFields = [
     "campaign_id",
     "campaign_name",
+    "spend",
+    "impressions",
+    "clicks",
+    "ctr",
+    "cpc",
+    "cpm",
+    "actions",
+    "action_values",
+  ].join(",");
+
+  const insightsUrl =
+    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/insights` +
+    `?level=campaign&${dateParam}&fields=${insightFields}&limit=500&access_token=${token}`;
+  const campaignsUrl =
+    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/campaigns` +
+    `?fields=id,effective_status&limit=500&access_token=${token}`;
+
+  try {
+    const [insightsRes, campaignsRes] = await Promise.all([fetch(insightsUrl), fetch(campaignsUrl)]);
+    const [insightsData, campaignsData] = await Promise.all([insightsRes.json(), campaignsRes.json()]);
+
+    if (insightsData.error) throw new Error(insightsData.error.message);
+    if (campaignsData.error) throw new Error(campaignsData.error.message);
+
+    const statusMap = toStatusMap(campaignsData.data);
+
+    const campaigns = (insightsData.data || []).map((row) => {
+      const m = extractMetrics(row);
+      return {
+        id: row.campaign_id,
+        name: row.campaign_name,
+        status: statusMap[row.campaign_id] || "UNKNOWN",
+        ...m,
+        ...deriveRates(m),
+      };
+    });
+
+    return { channelLabel: account.label, channelKey, campaigns };
+  } catch (err) {
+    return { channelLabel: account.label, channelKey, error: err.message };
+  }
+}
+
+// ---------- 2) 특정 캠페인의 광고세트 목록 (캠페인 클릭 시) ----------
+async function handleAdsets(request, env) {
+  const url = new URL(request.url);
+  const brand = (url.searchParams.get("brand") || "").toLowerCase();
+  const channel = (url.searchParams.get("channel") || "").toLowerCase();
+  const campaignId = url.searchParams.get("campaignId");
+  const dateParam = getDateParam(url);
+
+  if (!campaignId) return jsonResponse({ error: "campaignId가 필요합니다." }, 400);
+
+  const { token, error } = getToken(env, brand, channel);
+  if (error) return jsonResponse({ error }, 400);
+
+  const insightFields = [
     "adset_id",
     "adset_name",
+    "spend",
+    "impressions",
+    "clicks",
+    "ctr",
+    "cpc",
+    "cpm",
+    "actions",
+    "action_values",
+  ].join(",");
+
+  const insightsUrl =
+    `https://graph.facebook.com/${GRAPH_VERSION}/${campaignId}/insights` +
+    `?level=adset&${dateParam}&fields=${insightFields}&limit=500&access_token=${token}`;
+  const adsetsUrl =
+    `https://graph.facebook.com/${GRAPH_VERSION}/${campaignId}/adsets` +
+    `?fields=id,effective_status&limit=500&access_token=${token}`;
+
+  try {
+    const [insightsRes, adsetsRes] = await Promise.all([fetch(insightsUrl), fetch(adsetsUrl)]);
+    const [insightsData, adsetsData] = await Promise.all([insightsRes.json(), adsetsRes.json()]);
+
+    if (insightsData.error) throw new Error(insightsData.error.message);
+    if (adsetsData.error) throw new Error(adsetsData.error.message);
+
+    const statusMap = toStatusMap(adsetsData.data);
+
+    const adsets = (insightsData.data || []).map((row) => {
+      const m = extractMetrics(row);
+      return {
+        id: row.adset_id,
+        name: row.adset_name,
+        status: statusMap[row.adset_id] || "UNKNOWN",
+        ...m,
+        ...deriveRates(m),
+      };
+    });
+
+    adsets.sort((a, b) => b.spend - a.spend);
+
+    return jsonResponse({ adsets, fetchedAt: new Date().toISOString() });
+  } catch (err) {
+    return jsonResponse({ error: err.message }, 500);
+  }
+}
+
+// ---------- 3) 특정 광고세트의 소재(광고) 목록 (광고세트 클릭 시) ----------
+async function handleAds(request, env) {
+  const url = new URL(request.url);
+  const brand = (url.searchParams.get("brand") || "").toLowerCase();
+  const channel = (url.searchParams.get("channel") || "").toLowerCase();
+  const adsetId = url.searchParams.get("adsetId");
+  const dateParam = getDateParam(url);
+
+  if (!adsetId) return jsonResponse({ error: "adsetId가 필요합니다." }, 400);
+
+  const { token, error } = getToken(env, brand, channel);
+  if (error) return jsonResponse({ error }, 400);
+
+  const insightFields = [
     "ad_id",
     "ad_name",
     "spend",
@@ -143,107 +270,41 @@ async function fetchChannelData(channelKey, account, dateParam, env) {
   ].join(",");
 
   const insightsUrl =
-    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/insights` +
+    `https://graph.facebook.com/${GRAPH_VERSION}/${adsetId}/insights` +
     `?level=ad&${dateParam}&fields=${insightFields}&limit=500&access_token=${token}`;
-
-  // 상태(운영중/일시중지 등)는 인사이트에 없어서 각 레벨 엣지에서 별도 조회
-  const campaignsUrl =
-    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/campaigns` +
-    `?fields=id,effective_status&limit=500&access_token=${token}`;
-  const adsetsUrl =
-    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/adsets` +
-    `?fields=id,effective_status&limit=500&access_token=${token}`;
   const adsUrl =
-    `https://graph.facebook.com/${GRAPH_VERSION}/${adAccountId}/ads` +
+    `https://graph.facebook.com/${GRAPH_VERSION}/${adsetId}/ads` +
     `?fields=id,effective_status&limit=500&access_token=${token}`;
 
   try {
-    const [insightsRes, campaignsRes, adsetsRes, adsRes] = await Promise.all([
-      fetch(insightsUrl),
-      fetch(campaignsUrl),
-      fetch(adsetsUrl),
-      fetch(adsUrl),
-    ]);
-
-    const [insightsData, campaignsData, adsetsData, adsData] = await Promise.all([
-      insightsRes.json(),
-      campaignsRes.json(),
-      adsetsRes.json(),
-      adsRes.json(),
-    ]);
+    const [insightsRes, adsRes] = await Promise.all([fetch(insightsUrl), fetch(adsUrl)]);
+    const [insightsData, adsData] = await Promise.all([insightsRes.json(), adsRes.json()]);
 
     if (insightsData.error) throw new Error(insightsData.error.message);
-    if (campaignsData.error) throw new Error(campaignsData.error.message);
-    if (adsetsData.error) throw new Error(adsetsData.error.message);
     if (adsData.error) throw new Error(adsData.error.message);
 
-    const campaignStatus = toStatusMap(campaignsData.data);
-    const adsetStatus = toStatusMap(adsetsData.data);
-    const adStatus = toStatusMap(adsData.data);
+    const statusMap = toStatusMap(adsData.data);
 
-    // campaignId -> { ...meta, adsets: { adsetId -> { ...meta, ads: [] } } }
-    const campaignMap = new Map();
-
-    (insightsData.data || []).forEach((row) => {
-      const purchaseAction = findAction(row.actions, ["purchase", "omni_purchase"]);
-      const purchaseValue = findAction(row.action_values, ["purchase", "omni_purchase"]);
-      const spend = toNumber(row.spend);
-      const revenue = purchaseValue ? toNumber(purchaseValue.value) : 0;
-
-      const adMetrics = {
-        spend,
-        impressions: toInt(row.impressions),
-        clicks: toInt(row.clicks),
-        purchases: purchaseAction ? toInt(purchaseAction.value) : 0,
-        revenue,
-      };
-
-      const ad = {
+    const ads = (insightsData.data || []).map((row) => {
+      const m = extractMetrics(row);
+      return {
         id: row.ad_id,
         name: row.ad_name,
-        status: adStatus[row.ad_id] || "UNKNOWN",
-        ...adMetrics,
-        ...deriveRates(adMetrics),
+        status: statusMap[row.ad_id] || "UNKNOWN",
+        ...m,
+        ...deriveRates(m),
       };
-
-      if (!campaignMap.has(row.campaign_id)) {
-        campaignMap.set(row.campaign_id, {
-          id: row.campaign_id,
-          name: row.campaign_name,
-          status: campaignStatus[row.campaign_id] || "UNKNOWN",
-          adsets: new Map(),
-        });
-      }
-      const campaign = campaignMap.get(row.campaign_id);
-
-      if (!campaign.adsets.has(row.adset_id)) {
-        campaign.adsets.set(row.adset_id, {
-          id: row.adset_id,
-          name: row.adset_name,
-          status: adsetStatus[row.adset_id] || "UNKNOWN",
-          ads: [],
-        });
-      }
-      campaign.adsets.get(row.adset_id).ads.push(ad);
     });
 
-    // Map -> 배열로 변환하면서 adset/campaign 단위 지표를 하위 항목 합산으로 계산
-    const campaigns = Array.from(campaignMap.values()).map((c) => {
-      const adsets = Array.from(c.adsets.values()).map((as) => {
-        const metrics = sumMetrics(as.ads);
-        return { id: as.id, name: as.name, status: as.status, ads: as.ads, ...metrics };
-      });
-      adsets.sort((a, b) => b.spend - a.spend);
-      const metrics = sumMetrics(adsets);
-      return { id: c.id, name: c.name, status: c.status, adsets, ...metrics };
-    });
+    ads.sort((a, b) => b.spend - a.spend);
 
-    return { channelLabel: account.label, campaigns };
+    return jsonResponse({ ads, fetchedAt: new Date().toISOString() });
   } catch (err) {
-    return { channelLabel: account.label, error: err.message };
+    return jsonResponse({ error: err.message }, 500);
   }
 }
 
+// ---------- 공통 유틸 ----------
 function toStatusMap(list) {
   const map = {};
   (list || []).forEach((item) => {
@@ -252,7 +313,18 @@ function toStatusMap(list) {
   return map;
 }
 
-// 하위 항목(광고/광고세트/캠페인) 배열의 지표를 합산하고 파생 지표(ctr/cpc/roas)를 계산
+function extractMetrics(row) {
+  const purchaseAction = findAction(row.actions, ["purchase", "omni_purchase"]);
+  const purchaseValue = findAction(row.action_values, ["purchase", "omni_purchase"]);
+  return {
+    spend: toNumber(row.spend),
+    impressions: toInt(row.impressions),
+    clicks: toInt(row.clicks),
+    purchases: purchaseAction ? toInt(purchaseAction.value) : 0,
+    revenue: purchaseValue ? toNumber(purchaseValue.value) : 0,
+  };
+}
+
 function sumMetrics(items) {
   const totals = items.reduce(
     (acc, item) => {
