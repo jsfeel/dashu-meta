@@ -9,6 +9,13 @@
 
 const GRAPH_VERSION = "v21.0";
 
+// 소재 판단 기본 기준값 (필요시 여기서만 조정하면 전체에 반영됨)
+const JUDGMENT = {
+  TARGET_ROAS: 2.0, // 이 값 이상이면 "효율 양호"
+  CTR_DROP_RATIO: 0.2, // 최근 3일 평균 CTR이 초반 3일 대비 이 비율(20%) 이상 하락하면 피로 신호에 포함
+  FATIGUE_FREQUENCY: 1.3, // 빈도가 이 값 이상이면 피로 신호에 포함
+};
+
 // 브랜드별 채널 -> 광고계정ID / 사용 토큰 매핑
 // tokenKey는 env에 등록한 시크릿 이름과 매칭됩니다 (META_TOKEN_A ~ META_TOKEN_E)
 const ACCOUNTS = {
@@ -45,6 +52,7 @@ export default {
     if (url.pathname === "/api/meta-ads") return handleCampaigns(request, env);
     if (url.pathname === "/api/meta-ads/adsets") return handleAdsets(request, env);
     if (url.pathname === "/api/meta-ads/ads") return handleAds(request, env);
+    if (url.pathname === "/api/meta-ads/ad-detail") return handleAdDetail(request, env);
 
     return env.ASSETS.fetch(request);
   },
@@ -302,6 +310,113 @@ async function handleAds(request, env) {
   } catch (err) {
     return jsonResponse({ error: err.message }, 500);
   }
+}
+
+// ---------- 4) 소재 상세 (일별 추이 + 효율/피로 판단) ----------
+async function handleAdDetail(request, env) {
+  const url = new URL(request.url);
+  const brand = (url.searchParams.get("brand") || "").toLowerCase();
+  const channel = (url.searchParams.get("channel") || "").toLowerCase();
+  const adId = url.searchParams.get("adId");
+  const dateParam = getDateParam(url);
+
+  if (!adId) return jsonResponse({ error: "adId가 필요합니다." }, 400);
+
+  const { token, error } = getToken(env, brand, channel);
+  if (error) return jsonResponse({ error }, 400);
+
+  const dailyFields = ["spend", "impressions", "clicks", "ctr", "frequency", "actions", "action_values"].join(",");
+
+  const adInfoUrl = `https://graph.facebook.com/${GRAPH_VERSION}/${adId}?fields=id,name,effective_status,created_time&access_token=${token}`;
+  const dailyUrl =
+    `https://graph.facebook.com/${GRAPH_VERSION}/${adId}/insights` +
+    `?${dateParam}&time_increment=1&fields=${dailyFields}&limit=500&access_token=${token}`;
+
+  try {
+    const [adInfoRes, dailyRes] = await Promise.all([fetch(adInfoUrl), fetch(dailyUrl)]);
+    const [adInfo, dailyData] = await Promise.all([adInfoRes.json(), dailyRes.json()]);
+
+    if (adInfo.error) throw new Error(adInfo.error.message);
+    if (dailyData.error) throw new Error(dailyData.error.message);
+
+    const daily = (dailyData.data || [])
+      .map((row) => {
+        const m = extractMetrics(row);
+        return {
+          date: row.date_start,
+          frequency: toNumber(row.frequency),
+          ...m,
+          ...deriveRates(m),
+        };
+      })
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+    const totals = sumMetrics(daily);
+    const latestFrequency = daily.length ? daily[daily.length - 1].frequency : 0;
+    const cpa = totals.purchases > 0 ? totals.spend / totals.purchases : null;
+
+    // 피로도: 초반 3일 vs 최근 3일 평균 CTR 비교
+    const earlyDays = daily.slice(0, 3);
+    const recentDays = daily.slice(Math.max(0, daily.length - 3));
+    const avgCtr = (arr) => (arr.length ? arr.reduce((s, d) => s + d.ctr, 0) / arr.length : 0);
+    const earlyCtr = avgCtr(earlyDays);
+    const recentCtr = avgCtr(recentDays);
+    const ctrDropRatio = earlyCtr > 0 ? (earlyCtr - recentCtr) / earlyCtr : 0;
+    const fatigued = ctrDropRatio >= JUDGMENT.CTR_DROP_RATIO && latestFrequency >= JUDGMENT.FATIGUE_FREQUENCY;
+    const efficient = totals.roas >= JUDGMENT.TARGET_ROAS;
+
+    const judgment = buildJudgment(efficient, fatigued);
+
+    // 수명: 생성일 -> 첫 지출일 -> 마지막 지출일
+    const createdDate = adInfo.created_time ? adInfo.created_time.slice(0, 10) : null;
+    const spendDays = daily.filter((d) => d.spend > 0);
+    const firstSpendDate = spendDays.length ? spendDays[0].date : null;
+    const lastSpendDate = spendDays.length ? spendDays[spendDays.length - 1].date : null;
+    const daysBetween = (a, b) => (a && b ? Math.round((new Date(b) - new Date(a)) / 86400000) : null);
+
+    return jsonResponse({
+      id: adInfo.id,
+      name: adInfo.name,
+      status: adInfo.effective_status,
+      createdDate,
+      summary: {
+        spend: totals.spend,
+        revenue: totals.revenue,
+        roas: totals.roas,
+        ctr: totals.ctr,
+        cpa,
+        frequency: latestFrequency,
+        purchases: totals.purchases,
+      },
+      daily,
+      fatigue: {
+        earlyCtr,
+        recentCtr,
+        ctrDropRatio,
+        frequency: latestFrequency,
+        fatigued,
+      },
+      judgment,
+      lifespan: {
+        createdDate,
+        firstSpendDate,
+        lastSpendDate,
+        daysCreatedToFirstSpend: daysBetween(createdDate, firstSpendDate),
+        daysFirstToLastSpend: daysBetween(firstSpendDate, lastSpendDate),
+        daysRunning: daysBetween(createdDate, new Date().toISOString().slice(0, 10)),
+      },
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    return jsonResponse({ error: err.message }, 500);
+  }
+}
+
+function buildJudgment(efficient, fatigued) {
+  if (efficient && !fatigued) return { efficient, fatigued, label: "효율 양호", action: "증액 테스트", tone: "good" };
+  if (efficient && fatigued) return { efficient, fatigued, label: "효율 양호", action: "소재 교체 준비 후 유지", tone: "warn" };
+  if (!efficient && fatigued) return { efficient, fatigued, label: "효율 우려", action: "즉시 교체 검토", tone: "bad" };
+  return { efficient, fatigued, label: "효율 우려", action: "타겟팅·소재 점검 필요", tone: "bad" };
 }
 
 // ---------- 공통 유틸 ----------

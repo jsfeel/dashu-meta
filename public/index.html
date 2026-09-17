@@ -117,7 +117,49 @@
 
   .state-msg { padding: 40px 32px; color: var(--text-muted); text-align: center; }
   .error { color: var(--danger); }
+
+  /* 소재 상세 패널 */
+  .detail-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; justify-content: flex-end; z-index: 100;
+  }
+  .detail-panel {
+    background: var(--card-bg); width: 420px; max-width: 92vw; height: 100%;
+    overflow-y: auto; padding: 20px; position: relative; box-shadow: -4px 0 24px rgba(0,0,0,0.15);
+  }
+  .detail-close {
+    position: absolute; top: 16px; right: 16px; border: none; background: none;
+    font-size: 18px; cursor: pointer; color: var(--text-muted);
+  }
+  .detail-name { font-size: 16px; font-weight: 700; margin: 0 24px 4px 0; }
+  .detail-tags { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .judgment-banner {
+    border-radius: 10px; padding: 10px 14px; font-size: 13px; font-weight: 600; margin-bottom: 16px;
+  }
+  .judgment-banner.good { background: #dcfce7; color: var(--active); }
+  .judgment-banner.warn { background: #fef3c7; color: #b45309; }
+  .judgment-banner.bad { background: #fee2e2; color: var(--danger); }
+  .detail-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px;
+  }
+  .detail-metric { background: #f9fafb; border-radius: 8px; padding: 8px; text-align: center; }
+  .detail-metric .l { font-size: 10px; color: var(--text-muted); margin-bottom: 2px; }
+  .detail-metric .v { font-size: 13px; font-weight: 700; }
+  .detail-section-title { font-size: 13px; font-weight: 700; margin: 18px 0 8px; }
+  .chart-wrap { position: relative; height: 160px; margin-bottom: 8px; }
+  .fatigue-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
+  .fatigue-note {
+    margin-top: 6px; padding: 6px 10px; border-radius: 8px; font-size: 12px;
+  }
+  .fatigue-note.on { background: #fef3c7; color: #b45309; }
+  .fatigue-note.off { background: #f3f4f6; color: var(--text-muted); }
+  .lifespan-row { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+  .lifespan-step { flex: 1; text-align: center; background: #f9fafb; border-radius: 8px; padding: 8px 4px; }
+  .lifespan-step .l { color: var(--text-muted); font-size: 10px; }
+  .lifespan-step .v { font-weight: 700; font-size: 12px; }
+  .lifespan-arrow { color: var(--text-muted); font-size: 11px; white-space: nowrap; padding: 0 2px; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -354,6 +396,10 @@
       : `<span class="toggle-icon leaf">•</span>`;
     const rowClass = `level-${level}${hasChildren ? ' row-clickable' : ''}`;
     const style = level === 0 ? '' : ' style="display:none;"';
+    const detailBtn =
+      kind === 'ad'
+        ? `<button class="tab-btn sub detail-btn" data-detail-ad="${objectId}" data-channel-key="${channelKey}" style="margin-left:6px; padding:2px 8px; font-size:11px;">상세</button>`
+        : '';
 
     return `
       <tr class="${rowClass}" data-row-id="${rowId}" data-parent="${parentId || ''}"
@@ -362,6 +408,7 @@
           <div class="name-cell" style="padding-left:${indent}px;">
             ${toggleIcon}
             <span>${escapeHtml(item.name || '(이름 없음)')}</span>
+            ${detailBtn}
           </div>
         </td>
         <td>${channel ? `<span class="channel-tag">${escapeHtml(channel)}</span>` : ''}</td>
@@ -485,6 +532,163 @@
     return div.innerHTML;
   }
 
+  // ---------- 소재 상세 패널 ----------
+  const detailOverlay = document.getElementById('detail-overlay');
+  const detailBody = document.getElementById('detail-body');
+  const detailClose = document.getElementById('detail-close');
+  let detailChart1 = null;
+  let detailChart2 = null;
+
+  const statusDotColor = { ACTIVE: '#16a34a', PAUSED: '#9ca3af' };
+  const judgmentTagStyle = { good: 'good', warn: 'warn', bad: 'bad' };
+
+  async function openDetail(adId, channelKey) {
+    detailOverlay.style.display = 'flex';
+    detailBody.innerHTML = '<div class="state-msg">불러오는 중...</div>';
+
+    try {
+      const res = await fetch(
+        `/api/meta-ads/ad-detail?brand=${currentBrand}&channel=${channelKey}&adId=${adId}&${currentDateQuery}`
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      renderDetail(data);
+    } catch (err) {
+      detailBody.innerHTML = `<div class="state-msg error">불러오기 실패: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function closeDetail() {
+    detailOverlay.style.display = 'none';
+    if (detailChart1) { detailChart1.destroy(); detailChart1 = null; }
+    if (detailChart2) { detailChart2.destroy(); detailChart2 = null; }
+  }
+
+  detailClose.addEventListener('click', closeDetail);
+  detailOverlay.addEventListener('click', (e) => { if (e.target === detailOverlay) closeDetail(); });
+
+  function renderDetail(d) {
+    const s = d.summary;
+    const j = d.judgment;
+    const f = d.fatigue;
+    const l = d.lifespan;
+
+    detailBody.innerHTML = `
+      <h2 class="detail-name">${escapeHtml(d.name || '(이름 없음)')}</h2>
+      <div class="detail-tags">
+        <span class="badge ${d.status}">${statusLabel[d.status] || d.status}</span>
+      </div>
+      <div class="judgment-banner ${j.tone}">${j.label} — ${j.action}</div>
+
+      <div class="detail-grid">
+        <div class="detail-metric"><div class="l">지출</div><div class="v">${fmtWon(s.spend)}</div></div>
+        <div class="detail-metric"><div class="l">구매가치</div><div class="v">${fmtWon(s.revenue)}</div></div>
+        <div class="detail-metric"><div class="l">ROAS</div><div class="v">${fmtRoas(s.roas)}</div></div>
+        <div class="detail-metric"><div class="l">CTR</div><div class="v">${fmtPct(s.ctr)}</div></div>
+        <div class="detail-metric"><div class="l">CPA</div><div class="v">${s.cpa != null ? fmtWon(s.cpa) : '-'}</div></div>
+        <div class="detail-metric"><div class="l">빈도</div><div class="v">${s.frequency.toFixed(2)}</div></div>
+        <div class="detail-metric"><div class="l">집행일수</div><div class="v">${d.daily.length}일</div></div>
+        <div class="detail-metric"><div class="l">생성일</div><div class="v">${d.createdDate || '-'}</div></div>
+      </div>
+
+      <div class="detail-section-title">일별 지출 · ROAS</div>
+      <div class="chart-wrap"><canvas id="chart-spend-roas"></canvas></div>
+
+      <div class="detail-section-title">CTR · 빈도</div>
+      <div class="chart-wrap"><canvas id="chart-ctr-freq"></canvas></div>
+
+      <div class="detail-section-title">피로도</div>
+      <div class="fatigue-grid">
+        <div class="detail-metric"><div class="l">초기 3일 CTR</div><div class="v">${fmtPct(f.earlyCtr)}</div></div>
+        <div class="detail-metric"><div class="l">최근 3일 CTR</div><div class="v">${fmtPct(f.recentCtr)} (${f.ctrDropRatio >= 0 ? '-' : '+'}${Math.abs(f.ctrDropRatio * 100).toFixed(0)}%)</div></div>
+        <div class="detail-metric"><div class="l">최근 빈도</div><div class="v">${f.frequency.toFixed(2)}</div></div>
+      </div>
+      <div class="fatigue-note ${f.fatigued ? 'on' : 'off'}">${f.fatigued ? '피로 징후 — 교체 검토 대상' : '피로 징후 없음'}</div>
+
+      <div class="detail-section-title">수명</div>
+      <div class="lifespan-row">
+        <div class="lifespan-step"><div class="l">생성</div><div class="v">${l.createdDate || '-'}</div></div>
+        <div class="lifespan-arrow">+${l.daysCreatedToFirstSpend ?? '-'}일</div>
+        <div class="lifespan-step"><div class="l">첫 지출</div><div class="v">${l.firstSpendDate || '-'}</div></div>
+        <div class="lifespan-arrow">+${l.daysFirstToLastSpend ?? '-'}일</div>
+        <div class="lifespan-step"><div class="l">마지막 지출</div><div class="v">${l.lastSpendDate || '-'}</div></div>
+      </div>
+    `;
+
+    const labels = d.daily.map((row) => row.date.slice(5)); // MM-DD
+
+    if (detailChart1) detailChart1.destroy();
+    detailChart1 = new Chart(document.getElementById('chart-spend-roas'), {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'bar',
+            label: '지출',
+            data: d.daily.map((row) => row.spend),
+            backgroundColor: '#d69e4f',
+            yAxisID: 'y',
+          },
+          {
+            type: 'line',
+            label: 'ROAS',
+            data: d.daily.map((row) => row.roas),
+            borderColor: '#16a34a',
+            backgroundColor: '#16a34a',
+            yAxisID: 'y1',
+            tension: 0.3,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { position: 'left', ticks: { font: { size: 9 } } },
+          y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
+          x: { ticks: { font: { size: 9 } } },
+        },
+      },
+    });
+
+    if (detailChart2) detailChart2.destroy();
+    detailChart2 = new Chart(document.getElementById('chart-ctr-freq'), {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'line',
+            label: 'CTR',
+            data: d.daily.map((row) => row.ctr),
+            borderColor: '#d69e4f',
+            yAxisID: 'y',
+            tension: 0.3,
+          },
+          {
+            type: 'line',
+            label: '빈도',
+            data: d.daily.map((row) => row.frequency),
+            borderColor: '#9ca3af',
+            borderDash: [4, 4],
+            yAxisID: 'y1',
+            tension: 0.3,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { position: 'left', ticks: { font: { size: 9 } } },
+          y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
+          x: { ticks: { font: { size: 9 } } },
+        },
+      },
+    });
+  }
+
   brandTabs.addEventListener('click', (e) => {
     const btn = e.target.closest('.tab-btn');
     if (!btn) return;
@@ -506,6 +710,11 @@
   });
 
   tbody.addEventListener('click', (e) => {
+    const detailBtn = e.target.closest('.detail-btn');
+    if (detailBtn) {
+      openDetail(detailBtn.dataset.detailAd, detailBtn.dataset.channelKey);
+      return;
+    }
     const row = e.target.closest('tr[data-row-id]');
     if (!row) return;
     if (!row.classList.contains('row-clickable')) return;
@@ -528,6 +737,13 @@
   renderChannelTabs();
   loadData();
 </script>
+
+<div id="detail-overlay" class="detail-overlay" style="display:none;">
+  <div class="detail-panel">
+    <button class="detail-close" id="detail-close">✕</button>
+    <div id="detail-body"><div class="state-msg">불러오는 중...</div></div>
+  </div>
+</div>
 
 </body>
 </html>
