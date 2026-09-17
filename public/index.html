@@ -97,6 +97,24 @@
   .badge.UNKNOWN, .badge.ARCHIVED, .badge.DELETED { background: #f3f4f6; color: var(--text-muted); }
   .channel-tag { font-size: 11px; color: var(--text-muted); background: #f3f4f6; padding: 2px 8px; border-radius: 6px; }
 
+  tr.level-0 { font-weight: 600; }
+  tr.level-1 td { background: #fafbfc; }
+  tr.level-2 td { background: #f5f6f8; color: var(--text-muted); }
+  .name-cell { display: flex; align-items: center; gap: 6px; }
+  .toggle-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+  .toggle-icon.leaf { visibility: hidden; }
+  .row-clickable { cursor: pointer; }
+
   .state-msg { padding: 40px 32px; color: var(--text-muted); text-align: center; }
   .error { color: var(--danger); }
 </style>
@@ -145,7 +163,7 @@
   <table>
     <thead>
       <tr>
-        <th>캠페인명</th>
+        <th>캠페인 / 광고세트 / 소재</th>
         <th>채널</th>
         <th>상태</th>
         <th>소진액</th>
@@ -302,21 +320,90 @@
       tbody.innerHTML = '<tr><td colspan="11" class="state-msg">해당 기간에 데이터가 없습니다.</td></tr>';
       return;
     }
-    tbody.innerHTML = campaigns.map(c => `
-      <tr>
-        <td>${escapeHtml(c.name)}</td>
-        <td><span class="channel-tag">${escapeHtml(c.channel || '-')}</span></td>
-        <td><span class="badge ${c.status}">${statusLabel[c.status] || c.status}</span></td>
-        <td>${fmtWon(c.spend)}</td>
-        <td>${fmtNum(c.impressions)}</td>
-        <td>${fmtNum(c.clicks)}</td>
-        <td>${fmtPct(c.ctr)}</td>
-        <td>${fmtWon(c.cpc)}</td>
-        <td>${fmtNum(c.purchases)}</td>
-        <td>${fmtWon(c.revenue)}</td>
-        <td>${fmtRoas(c.roas)}</td>
+
+    const rows = [];
+
+    campaigns.forEach((c, ci) => {
+      const campaignRowId = `c${ci}`;
+      rows.push(buildRow(c, 0, campaignRowId, null, c.channel));
+
+      (c.adsets || []).forEach((as, ai) => {
+        const adsetRowId = `${campaignRowId}-as${ai}`;
+        rows.push(buildRow(as, 1, adsetRowId, campaignRowId, null));
+
+        (as.ads || []).forEach((ad, adi) => {
+          const adRowId = `${adsetRowId}-ad${adi}`;
+          rows.push(buildRow(ad, 2, adRowId, adsetRowId, null));
+        });
+      });
+    });
+
+    tbody.innerHTML = rows.map(renderRow).join('');
+  }
+
+  function buildRow(item, level, rowId, parentId, channel) {
+    const hasChildren = level < 2; // 캠페인/광고세트는 하위가 있을 수 있음, 소재(ad)는 최하단
+    return { item, level, rowId, parentId, hasChildren, channel };
+  }
+
+  function renderRow({ item, level, rowId, parentId, hasChildren, channel }) {
+    const indent = level * 20;
+    const toggleIcon = hasChildren
+      ? `<span class="toggle-icon" data-toggle="${rowId}">▶</span>`
+      : `<span class="toggle-icon leaf">•</span>`;
+    const rowClass = `level-${level}${hasChildren ? ' row-clickable' : ''}`;
+    const style = level === 0 ? '' : ' style="display:none;"';
+
+    return `
+      <tr class="${rowClass}" data-row-id="${rowId}" data-parent="${parentId || ''}"${style}>
+        <td>
+          <div class="name-cell" style="padding-left:${indent}px;">
+            ${toggleIcon}
+            <span>${escapeHtml(item.name || '(이름 없음)')}</span>
+          </div>
+        </td>
+        <td>${channel ? `<span class="channel-tag">${escapeHtml(channel)}</span>` : ''}</td>
+        <td><span class="badge ${item.status}">${statusLabel[item.status] || item.status}</span></td>
+        <td>${fmtWon(item.spend)}</td>
+        <td>${fmtNum(item.impressions)}</td>
+        <td>${fmtNum(item.clicks)}</td>
+        <td>${fmtPct(item.ctr)}</td>
+        <td>${fmtWon(item.cpc)}</td>
+        <td>${fmtNum(item.purchases)}</td>
+        <td>${fmtWon(item.revenue)}</td>
+        <td>${fmtRoas(item.roas)}</td>
       </tr>
-    `).join('');
+    `;
+  }
+
+  function toggleRow(rowId) {
+    const row = tbody.querySelector(`tr[data-row-id="${rowId}"]`);
+    if (!row) return;
+    const icon = row.querySelector(`.toggle-icon[data-toggle="${rowId}"]`);
+    const isExpanded = row.classList.contains('expanded');
+
+    if (isExpanded) {
+      collapseRow(rowId);
+    } else {
+      tbody.querySelectorAll(`tr[data-parent="${rowId}"]`).forEach((r) => {
+        r.style.display = '';
+      });
+      row.classList.add('expanded');
+      if (icon) icon.textContent = '▼';
+    }
+  }
+
+  function collapseRow(rowId) {
+    const row = tbody.querySelector(`tr[data-row-id="${rowId}"]`);
+    if (!row) return;
+    row.classList.remove('expanded');
+    const icon = row.querySelector(`.toggle-icon[data-toggle="${rowId}"]`);
+    if (icon) icon.textContent = '▶';
+
+    tbody.querySelectorAll(`tr[data-parent="${rowId}"]`).forEach((r) => {
+      r.style.display = 'none';
+      collapseRow(r.dataset.rowId);
+    });
   }
 
   function escapeHtml(str) {
@@ -343,6 +430,13 @@
     btn.classList.add('active');
     currentChannel = btn.dataset.channel;
     loadData();
+  });
+
+  tbody.addEventListener('click', (e) => {
+    const row = e.target.closest('tr[data-row-id]');
+    if (!row) return;
+    if (!row.classList.contains('row-clickable')) return;
+    toggleRow(row.dataset.rowId);
   });
 
   rangeSelect.addEventListener('change', () => {
