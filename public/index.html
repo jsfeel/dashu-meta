@@ -122,7 +122,10 @@
 <body>
 
 <header>
-  <h1>Meta 광고 대시보드</h1>
+  <div class="header-row" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+    <h1>Meta 광고 대시보드</h1>
+    <button class="tab-btn sub" id="refresh-btn">↻ 새로고침</button>
+  </div>
   <div class="subtitle" id="updated-at">불러오는 중...</div>
 </header>
 
@@ -226,6 +229,7 @@
   const tbody = document.getElementById('campaign-tbody');
   const updatedAt = document.getElementById('updated-at');
   const warnSlot = document.getElementById('warn-banner-slot');
+  const refreshBtn = document.getElementById('refresh-btn');
 
   let currentBrand = 'dashu';
   let currentChannel = 'all';
@@ -519,10 +523,10 @@
   });
 
   applyCustomRange.addEventListener('click', loadData);
+  refreshBtn.addEventListener('click', loadData);
 
   renderChannelTabs();
   loadData();
-  setInterval(loadData, 5 * 60 * 1000);
 </script>
 
 </body>
