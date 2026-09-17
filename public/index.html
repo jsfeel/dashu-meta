@@ -159,7 +159,8 @@
   .lifespan-step .v { font-weight: 700; font-size: 12px; }
   .lifespan-arrow { color: var(--text-muted); font-size: 11px; white-space: nowrap; padding: 0 2px; }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"
+        onerror="var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js'; document.head.appendChild(s);"></script>
 </head>
 <body>
 
@@ -624,76 +625,91 @@
 
     const labels = d.daily.map((row) => row.date.slice(5)); // MM-DD
 
-    if (detailChart1) detailChart1.destroy();
-    detailChart1 = new Chart(document.getElementById('chart-spend-roas'), {
-      data: {
-        labels,
-        datasets: [
-          {
-            type: 'bar',
-            label: '지출',
-            data: d.daily.map((row) => row.spend),
-            backgroundColor: '#d69e4f',
-            yAxisID: 'y',
-          },
-          {
-            type: 'line',
-            label: 'ROAS',
-            data: d.daily.map((row) => row.roas),
-            borderColor: '#16a34a',
-            backgroundColor: '#16a34a',
-            yAxisID: 'y1',
-            tension: 0.3,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          y: { position: 'left', ticks: { font: { size: 9 } } },
-          y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
-          x: { ticks: { font: { size: 9 } } },
-        },
-      },
-    });
+    if (typeof Chart === 'undefined') {
+      // Chart.js가 네트워크 정책 등으로 로드되지 않은 경우 - 나머지 정보는 정상 표시하고 차트만 대체 문구로 안내
+      document.querySelectorAll('.chart-wrap').forEach((el) => {
+        el.innerHTML = '<div class="state-msg" style="padding:20px 0;">차트 라이브러리를 불러오지 못했습니다 (네트워크 차단 가능성). 다른 네트워크에서 다시 시도해주세요.</div>';
+      });
+      return;
+    }
 
-    if (detailChart2) detailChart2.destroy();
-    detailChart2 = new Chart(document.getElementById('chart-ctr-freq'), {
-      data: {
-        labels,
-        datasets: [
-          {
-            type: 'line',
-            label: 'CTR',
-            data: d.daily.map((row) => row.ctr),
-            borderColor: '#d69e4f',
-            yAxisID: 'y',
-            tension: 0.3,
-          },
-          {
-            type: 'line',
-            label: '빈도',
-            data: d.daily.map((row) => row.frequency),
-            borderColor: '#9ca3af',
-            borderDash: [4, 4],
-            yAxisID: 'y1',
-            tension: 0.3,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          y: { position: 'left', ticks: { font: { size: 9 } } },
-          y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
-          x: { ticks: { font: { size: 9 } } },
+    try {
+      if (detailChart1) detailChart1.destroy();
+      detailChart1 = new Chart(document.getElementById('chart-spend-roas'), {
+        data: {
+          labels,
+          datasets: [
+            {
+              type: 'bar',
+              label: '지출',
+              data: d.daily.map((row) => row.spend),
+              backgroundColor: '#d69e4f',
+              yAxisID: 'y',
+            },
+            {
+              type: 'line',
+              label: 'ROAS',
+              data: d.daily.map((row) => row.roas),
+              borderColor: '#16a34a',
+              backgroundColor: '#16a34a',
+              yAxisID: 'y1',
+              tension: 0.3,
+            },
+          ],
         },
-      },
-    });
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { position: 'left', ticks: { font: { size: 9 } } },
+            y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
+            x: { ticks: { font: { size: 9 } } },
+          },
+        },
+      });
+
+      if (detailChart2) detailChart2.destroy();
+      detailChart2 = new Chart(document.getElementById('chart-ctr-freq'), {
+        data: {
+          labels,
+          datasets: [
+            {
+              type: 'line',
+              label: 'CTR',
+              data: d.daily.map((row) => row.ctr),
+              borderColor: '#d69e4f',
+              yAxisID: 'y',
+              tension: 0.3,
+            },
+            {
+              type: 'line',
+              label: '빈도',
+              data: d.daily.map((row) => row.frequency),
+              borderColor: '#9ca3af',
+              borderDash: [4, 4],
+              yAxisID: 'y1',
+              tension: 0.3,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { position: 'left', ticks: { font: { size: 9 } } },
+            y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
+            x: { ticks: { font: { size: 9 } } },
+          },
+        },
+      });
+    } catch (chartErr) {
+      // 차트 렌더링만 실패한 경우 - 나머지 정보는 이미 표시된 상태를 유지하고 차트 영역만 안내 문구로 대체
+      document.querySelectorAll('.chart-wrap').forEach((el) => {
+        el.innerHTML = '<div class="state-msg" style="padding:20px 0;">차트를 그리지 못했습니다.</div>';
+      });
+    }
   }
 
   brandTabs.addEventListener('click', (e) => {
