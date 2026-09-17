@@ -1,3 +1,7 @@
-name = "dashu-meta-ads-dashboard"
+name = "dashu-meta"
+main = "src/index.js"
 compatibility_date = "2024-09-23"
-pages_build_output_dir = "public"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"

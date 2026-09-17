@@ -1,11 +1,23 @@
-// functions/api/meta-ads.js
-// Cloudflare Pages Functions: 이 파일은 자동으로 GET /api/meta-ads 엔드포인트가 됩니다.
-// Meta Graph API(Marketing API)를 호출해 브랜드별(다슈/달리프/오하입) 캠페인 성과를 집계해서 내려줍니다.
+// src/index.js
+// Cloudflare Worker 엔트리포인트.
+// /api/meta-ads 요청은 이 코드가 직접 처리하고, 그 외 요청은 정적 파일(ASSETS)로 넘깁니다.
 
 const GRAPH_VERSION = "v21.0";
 
-export async function onRequestGet(context) {
-  const { request, env } = context;
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/api/meta-ads") {
+      return handleMetaAds(request, env);
+    }
+
+    // 그 외 모든 요청(index.html 등)은 정적 자산으로 서빙
+    return env.ASSETS.fetch(request);
+  },
+};
+
+async function handleMetaAds(request, env) {
   const url = new URL(request.url);
   const brand = (url.searchParams.get("brand") || "dashu").toLowerCase();
   // range: today | yesterday | last_7d | last_14d | last_30d | this_month | last_month
@@ -28,7 +40,7 @@ export async function onRequestGet(context) {
   const token = env.META_SYSTEM_USER_TOKEN;
   if (!token) {
     return jsonResponse(
-      { error: "META_SYSTEM_USER_TOKEN 환경변수가 설정되지 않았습니다. Cloudflare Pages 설정을 확인하세요." },
+      { error: "META_SYSTEM_USER_TOKEN 환경변수가 설정되지 않았습니다. Cloudflare 설정을 확인하세요." },
       500
     );
   }
@@ -65,7 +77,6 @@ export async function onRequestGet(context) {
     if (insightsData.error) throw new Error(insightsData.error.message);
     if (campaignsData.error) throw new Error(campaignsData.error.message);
 
-    // 캠페인명 -> 상태 매핑 (insights 응답에는 상태 정보가 없어서 별도 조회)
     const statusMap = {};
     (campaignsData.data || []).forEach((c) => {
       statusMap[c.name] = c.effective_status;
@@ -93,7 +104,6 @@ export async function onRequestGet(context) {
       };
     });
 
-    // 소진액 높은 순 정렬
     campaigns.sort((a, b) => b.spend - a.spend);
 
     const summary = campaigns.reduce(
