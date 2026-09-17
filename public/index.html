@@ -227,6 +227,13 @@
   </table>
 </div>
 
+<div id="detail-overlay" class="detail-overlay" style="display:none;">
+  <div class="detail-panel">
+    <button class="detail-close" id="detail-close">✕</button>
+    <div id="detail-body"><div class="state-msg">불러오는 중...</div></div>
+  </div>
+</div>
+
 <script>
   // 브랜드별 채널 구성 (실제 계정ID/토큰은 서버(Worker)에서만 관리)
   const CHANNELS = {
@@ -737,13 +744,6 @@
   renderChannelTabs();
   loadData();
 </script>
-
-<div id="detail-overlay" class="detail-overlay" style="display:none;">
-  <div class="detail-panel">
-    <button class="detail-close" id="detail-close">✕</button>
-    <div id="detail-body"><div class="state-msg">불러오는 중...</div></div>
-  </div>
-</div>
 
 </body>
 </html>
