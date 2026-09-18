@@ -157,6 +157,8 @@ async function fetchCampaignsForChannel(channelKey, account, dateParam, env) {
     "cpm",
     "actions",
     "action_values",
+    "catalog_segment_actions",
+    "catalog_segment_value",
   ].join(",");
 
   const insightsUrl =
@@ -174,9 +176,10 @@ async function fetchCampaignsForChannel(channelKey, account, dateParam, env) {
     if (campaignsData.error) throw new Error(campaignsData.error.message);
 
     const statusMap = toStatusMap(campaignsData.data);
+    const isCollab = channelKey !== "own";
 
     const campaigns = (insightsData.data || []).map((row) => {
-      const m = extractMetrics(row);
+      const m = extractMetrics(row, isCollab);
       return {
         id: row.campaign_id,
         name: row.campaign_name,
@@ -216,6 +219,8 @@ async function handleAdsets(request, env) {
     "cpm",
     "actions",
     "action_values",
+    "catalog_segment_actions",
+    "catalog_segment_value",
   ].join(",");
 
   const insightsUrl =
@@ -233,9 +238,10 @@ async function handleAdsets(request, env) {
     if (adsetsData.error) throw new Error(adsetsData.error.message);
 
     const statusMap = toStatusMap(adsetsData.data);
+    const isCollab = channel !== "own";
 
     const adsets = (insightsData.data || []).map((row) => {
-      const m = extractMetrics(row);
+      const m = extractMetrics(row, isCollab);
       return {
         id: row.adset_id,
         name: row.adset_name,
@@ -277,6 +283,8 @@ async function handleAds(request, env) {
     "cpm",
     "actions",
     "action_values",
+    "catalog_segment_actions",
+    "catalog_segment_value",
   ].join(",");
 
   const insightsUrl =
@@ -294,9 +302,10 @@ async function handleAds(request, env) {
     if (adsData.error) throw new Error(adsData.error.message);
 
     const statusMap = toStatusMap(adsData.data);
+    const isCollab = channel !== "own";
 
     const ads = (insightsData.data || []).map((row) => {
-      const m = extractMetrics(row);
+      const m = extractMetrics(row, isCollab);
       return {
         id: row.ad_id,
         name: row.ad_name,
@@ -328,7 +337,7 @@ async function handleAdDetail(request, env) {
   const { token, error } = getToken(env, brand, channel);
   if (error) return jsonResponse({ error }, 400);
 
-  const dailyFields = ["spend", "impressions", "clicks", "ctr", "frequency", "actions", "action_values"].join(",");
+  const dailyFields = ["spend", "impressions", "clicks", "ctr", "frequency", "actions", "action_values", "catalog_segment_actions", "catalog_segment_value"].join(",");
 
   const adInfoUrl = `https://graph.facebook.com/${GRAPH_VERSION}/${adId}?fields=id,name,effective_status,created_time&access_token=${token}`;
   const dailyUrl =
@@ -355,9 +364,10 @@ async function handleAdDetail(request, env) {
     if (dailyData.error) throw new Error(dailyData.error.message);
     if (adsetSpendData && adsetSpendData.error) throw new Error(adsetSpendData.error.message);
 
+    const isCollab = channel !== "own";
     const daily = (dailyData.data || [])
       .map((row) => {
-        const m = extractMetrics(row);
+        const m = extractMetrics(row, isCollab);
         return {
           date: row.date_start,
           frequency: toNumber(row.frequency),
@@ -495,9 +505,13 @@ function toStatusMap(list) {
   return map;
 }
 
-function extractMetrics(row) {
-  const purchaseAction = findAction(row.actions, ["purchase", "omni_purchase"]);
-  const purchaseValue = findAction(row.action_values, ["purchase", "omni_purchase"]);
+function extractMetrics(row, isCollab) {
+  // 자사몰(own)이 아닌 협력광고 채널(무신사/네이버/올리브영/29CM 등)은
+  // "공유 항목이 포함된 구매"(catalog_segment_*) 기준으로 구매/매출을 집계
+  const actionsList = isCollab ? row.catalog_segment_actions : row.actions;
+  const valuesList = isCollab ? row.catalog_segment_value : row.action_values;
+  const purchaseAction = findAction(actionsList, ["purchase", "omni_purchase"]);
+  const purchaseValue = findAction(valuesList, ["purchase", "omni_purchase"]);
   return {
     spend: toNumber(row.spend),
     impressions: toInt(row.impressions),
