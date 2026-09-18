@@ -139,6 +139,7 @@
   .judgment-banner.good { background: #dcfce7; color: var(--active); }
   .judgment-banner.warn { background: #fef3c7; color: #b45309; }
   .judgment-banner.bad { background: #fee2e2; color: var(--danger); }
+  .judgment-reason { font-size: 12px; color: var(--text-muted); margin: -8px 0 16px; line-height: 1.5; }
   .detail-grid {
     display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px;
   }
@@ -397,7 +398,7 @@
     tbody.innerHTML = rows.join('');
   }
 
-  function renderRow({ item, level, rowId, parentId, hasChildren, channel, kind, objectId, channelKey }) {
+  function renderRow({ item, level, rowId, parentId, hasChildren, channel, kind, objectId, channelKey, adsetId }) {
     const indent = level * 20;
     const toggleIcon = hasChildren
       ? `<span class="toggle-icon" data-toggle="${rowId}">▶</span>`
@@ -406,7 +407,7 @@
     const style = level === 0 ? '' : ' style="display:none;"';
     const detailBtn =
       kind === 'ad'
-        ? `<button class="tab-btn sub detail-btn" data-detail-ad="${objectId}" data-channel-key="${channelKey}" style="margin-left:6px; padding:2px 8px; font-size:11px;">상세</button>`
+        ? `<button class="tab-btn sub detail-btn" data-detail-ad="${objectId}" data-channel-key="${channelKey}" data-adset-id="${adsetId || ''}" style="margin-left:6px; padding:2px 8px; font-size:11px;">상세</button>`
         : '';
 
     return `
@@ -503,6 +504,7 @@
           kind: 'ad',
           objectId: ad.id,
           channelKey,
+          adsetId: objectId,
         }));
       }
 
@@ -550,13 +552,13 @@
   const statusDotColor = { ACTIVE: '#16a34a', PAUSED: '#9ca3af' };
   const judgmentTagStyle = { good: 'good', warn: 'warn', bad: 'bad' };
 
-  async function openDetail(adId, channelKey) {
+  async function openDetail(adId, channelKey, adsetId) {
     detailOverlay.style.display = 'flex';
     detailBody.innerHTML = '<div class="state-msg">불러오는 중...</div>';
 
     try {
       const res = await fetch(
-        `/api/meta-ads/ad-detail?brand=${currentBrand}&channel=${channelKey}&adId=${adId}&${currentDateQuery}`
+        `/api/meta-ads/ad-detail?brand=${currentBrand}&channel=${channelKey}&adId=${adId}&adsetId=${adsetId || ''}&${currentDateQuery}`
       );
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -587,6 +589,7 @@
         <span class="badge ${d.status}">${statusLabel[d.status] || d.status}</span>
       </div>
       <div class="judgment-banner ${j.tone}">${j.label} — ${j.action}</div>
+      <div class="judgment-reason">${escapeHtml(j.reason || '')}</div>
 
       <div class="detail-grid">
         <div class="detail-metric"><div class="l">지출</div><div class="v">${fmtWon(s.spend)}</div></div>
@@ -641,14 +644,14 @@
           datasets: [
             {
               type: 'bar',
-              label: '지출',
+              label: '지출 (좌측 축, 원)',
               data: d.daily.map((row) => row.spend),
               backgroundColor: '#d69e4f',
               yAxisID: 'y',
             },
             {
               type: 'line',
-              label: 'ROAS',
+              label: 'ROAS (우측 축, 배)',
               data: d.daily.map((row) => row.roas),
               borderColor: '#16a34a',
               backgroundColor: '#16a34a',
@@ -660,7 +663,13 @@
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
+          plugins: {
+            legend: {
+              display: true,
+              position: 'top',
+              labels: { boxWidth: 10, font: { size: 10 } },
+            },
+          },
           scales: {
             y: { position: 'left', ticks: { font: { size: 9 } } },
             y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
@@ -676,7 +685,7 @@
           datasets: [
             {
               type: 'line',
-              label: 'CTR',
+              label: 'CTR (좌측 축, %)',
               data: d.daily.map((row) => row.ctr),
               borderColor: '#d69e4f',
               yAxisID: 'y',
@@ -684,7 +693,7 @@
             },
             {
               type: 'line',
-              label: '빈도',
+              label: '빈도 (우측 축)',
               data: d.daily.map((row) => row.frequency),
               borderColor: '#9ca3af',
               borderDash: [4, 4],
@@ -696,7 +705,13 @@
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
+          plugins: {
+            legend: {
+              display: true,
+              position: 'top',
+              labels: { boxWidth: 10, font: { size: 10 } },
+            },
+          },
           scales: {
             y: { position: 'left', ticks: { font: { size: 9 } } },
             y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { font: { size: 9 } } },
@@ -735,7 +750,7 @@
   tbody.addEventListener('click', (e) => {
     const detailBtn = e.target.closest('.detail-btn');
     if (detailBtn) {
-      openDetail(detailBtn.dataset.detailAd, detailBtn.dataset.channelKey);
+      openDetail(detailBtn.dataset.detailAd, detailBtn.dataset.channelKey, detailBtn.dataset.adsetId);
       return;
     }
     const row = e.target.closest('tr[data-row-id]');

@@ -14,6 +14,8 @@ const JUDGMENT = {
   TARGET_ROAS: 2.0, // 이 값 이상이면 "효율 양호"
   CTR_DROP_RATIO: 0.2, // 최근 3일 평균 CTR이 초반 3일 대비 이 비율(20%) 이상 하락하면 피로 신호에 포함
   FATIGUE_FREQUENCY: 1.3, // 빈도가 이 값 이상이면 피로 신호에 포함
+  LOW_SPEND_SHARE: 0.1, // 광고세트 내 지출 비중이 이 비율(10%) 미만이면 "지출 비중 작음"으로 판단
+  HIGH_SPEND_SHARE: 0.4, // 이 비율(40%) 이상이면 "지출 비중 큼"으로 판단
 };
 
 // 브랜드별 채널 -> 광고계정ID / 사용 토큰 매핑
@@ -318,6 +320,7 @@ async function handleAdDetail(request, env) {
   const brand = (url.searchParams.get("brand") || "").toLowerCase();
   const channel = (url.searchParams.get("channel") || "").toLowerCase();
   const adId = url.searchParams.get("adId");
+  const adsetId = url.searchParams.get("adsetId");
   const dateParam = getDateParam(url);
 
   if (!adId) return jsonResponse({ error: "adId가 필요합니다." }, 400);
@@ -331,13 +334,26 @@ async function handleAdDetail(request, env) {
   const dailyUrl =
     `https://graph.facebook.com/${GRAPH_VERSION}/${adId}/insights` +
     `?${dateParam}&time_increment=1&fields=${dailyFields}&limit=500&access_token=${token}`;
+  // 같은 기간 동안 이 소재가 속한 광고세트 전체 지출 (지출 비중 계산용, adsetId가 없으면 생략)
+  const adsetSpendUrl = adsetId
+    ? `https://graph.facebook.com/${GRAPH_VERSION}/${adsetId}/insights?${dateParam}&fields=spend&access_token=${token}`
+    : null;
 
   try {
-    const [adInfoRes, dailyRes] = await Promise.all([fetch(adInfoUrl), fetch(dailyUrl)]);
-    const [adInfo, dailyData] = await Promise.all([adInfoRes.json(), dailyRes.json()]);
+    const [adInfoRes, dailyRes, adsetSpendRes] = await Promise.all([
+      fetch(adInfoUrl),
+      fetch(dailyUrl),
+      adsetSpendUrl ? fetch(adsetSpendUrl) : Promise.resolve(null),
+    ]);
+    const [adInfo, dailyData, adsetSpendData] = await Promise.all([
+      adInfoRes.json(),
+      dailyRes.json(),
+      adsetSpendRes ? adsetSpendRes.json() : Promise.resolve(null),
+    ]);
 
     if (adInfo.error) throw new Error(adInfo.error.message);
     if (dailyData.error) throw new Error(dailyData.error.message);
+    if (adsetSpendData && adsetSpendData.error) throw new Error(adsetSpendData.error.message);
 
     const daily = (dailyData.data || [])
       .map((row) => {
@@ -355,6 +371,10 @@ async function handleAdDetail(request, env) {
     const latestFrequency = daily.length ? daily[daily.length - 1].frequency : 0;
     const cpa = totals.purchases > 0 ? totals.spend / totals.purchases : null;
 
+    const adsetSpend =
+      adsetSpendData && adsetSpendData.data && adsetSpendData.data[0] ? toNumber(adsetSpendData.data[0].spend) : null;
+    const spendShare = adsetSpend && adsetSpend > 0 ? totals.spend / adsetSpend : null;
+
     // 피로도: 초반 3일 vs 최근 3일 평균 CTR 비교
     const earlyDays = daily.slice(0, 3);
     const recentDays = daily.slice(Math.max(0, daily.length - 3));
@@ -365,7 +385,7 @@ async function handleAdDetail(request, env) {
     const fatigued = ctrDropRatio >= JUDGMENT.CTR_DROP_RATIO && latestFrequency >= JUDGMENT.FATIGUE_FREQUENCY;
     const efficient = totals.roas >= JUDGMENT.TARGET_ROAS;
 
-    const judgment = buildJudgment(efficient, fatigued);
+    const judgment = buildJudgment(efficient, fatigued, totals.roas, spendShare, ctrDropRatio, latestFrequency);
 
     // 수명: 생성일 -> 첫 지출일 -> 마지막 지출일
     const createdDate = adInfo.created_time ? adInfo.created_time.slice(0, 10) : null;
@@ -387,6 +407,7 @@ async function handleAdDetail(request, env) {
         cpa,
         frequency: latestFrequency,
         purchases: totals.purchases,
+        spendShare,
       },
       daily,
       fatigue: {
@@ -412,11 +433,57 @@ async function handleAdDetail(request, env) {
   }
 }
 
-function buildJudgment(efficient, fatigued) {
-  if (efficient && !fatigued) return { efficient, fatigued, label: "효율 양호", action: "증액 테스트", tone: "good" };
-  if (efficient && fatigued) return { efficient, fatigued, label: "효율 양호", action: "소재 교체 준비 후 유지", tone: "warn" };
-  if (!efficient && fatigued) return { efficient, fatigued, label: "효율 우려", action: "즉시 교체 검토", tone: "bad" };
-  return { efficient, fatigued, label: "효율 우려", action: "타겟팅·소재 점검 필요", tone: "bad" };
+// 효율/피로/지출비중을 조합해 라벨·액션·이유 문장을 생성
+function buildJudgment(efficient, fatigued, roas, spendShare, ctrDropRatio, frequency) {
+  let label, action, tone;
+  if (efficient && !fatigued) {
+    label = "효율 양호";
+    action = "증액 테스트";
+    tone = "good";
+  } else if (efficient && fatigued) {
+    label = "효율 양호";
+    action = "소재 교체 준비 후 유지";
+    tone = "warn";
+  } else if (!efficient && fatigued) {
+    label = "효율 우려";
+    action = "즉시 교체 검토";
+    tone = "bad";
+  } else {
+    label = "효율 우려";
+    action = "타겟팅·소재 점검 필요";
+    tone = "bad";
+  }
+
+  // 판정 이유 문장 조립 (예: "ROAS 3.00x이지만 지출 비중 5.7%로 작음. 예산을 올려 규모 확인.")
+  const roasPart = `ROAS ${roas.toFixed(2)}x`;
+  const parts = [];
+
+  if (spendShare != null) {
+    const sharePct = (spendShare * 100).toFixed(1);
+    if (spendShare < JUDGMENT.LOW_SPEND_SHARE) {
+      parts.push(`${efficient ? "이지만" : "이고"} 지출 비중 ${sharePct}%로 작음`);
+      if (efficient && !fatigued) parts.push("예산을 올려 규모 확인");
+    } else if (spendShare >= JUDGMENT.HIGH_SPEND_SHARE) {
+      parts.push(`이고 지출 비중 ${sharePct}%로 이미 큼`);
+      if (efficient && !fatigued) parts.push("현재 비중 유지하며 지켜보기");
+    } else {
+      parts.push(`이고 지출 비중 ${sharePct}%`);
+    }
+  }
+
+  if (fatigued) {
+    parts.push(`CTR ${(ctrDropRatio * 100).toFixed(0)}% 하락 + 빈도 ${frequency.toFixed(2)}로 피로 징후`);
+  }
+
+  let reason;
+  if (parts.length === 0) {
+    reason = `${roasPart}. ${efficient ? "효율 양호" : "목표 ROAS 미달"}.`;
+  } else {
+    reason = `${roasPart}${parts[0]}. ${parts.slice(1).join(". ")}`.trim();
+    if (!reason.endsWith(".")) reason += ".";
+  }
+
+  return { efficient, fatigued, label, action, tone, reason };
 }
 
 // ---------- 공통 유틸 ----------
