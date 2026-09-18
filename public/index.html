@@ -648,6 +648,7 @@
               data: d.daily.map((row) => row.spend),
               backgroundColor: '#d69e4f',
               yAxisID: 'y',
+              order: 2, // 낮은 order가 위에 그려지므로 막대는 뒤로
             },
             {
               type: 'line',
@@ -657,6 +658,8 @@
               backgroundColor: '#16a34a',
               yAxisID: 'y1',
               tension: 0.3,
+              order: 1, // ROAS 선이 항상 막대 위에 그려지도록
+              z: 10,
             },
           ],
         },
